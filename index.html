@@ -1,16 +1,281 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="ja">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width">
-  <title>replit</title>
-  <link href="style.css" rel="stylesheet" type="text/css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ゆらんと鬼ごっこゲーム</title>
+  <style>
+    body {
+      text-align: center;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      background-color: #fafafa;
+    }
+    h1 { margin-top: 20px; }
+    #controls { margin: 10px; }
+    #score { font-size: 20px; margin: 10px; }
+    canvas {
+      display: block;
+      margin: 20px auto;
+      background-color: #fff;
+      border: 1px solid #333;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 5px;
+      font-size: 16px;
+    }
+  </style>
 </head>
-
 <body>
-  Hello world
-  <script src="script.js"></script>
-</body>
+  <h1>ゆらんと鬼ごっこゲーム</h1>
+  <div id="controls">
+    <button id="zoomInBtn">拡大</button>
+    <button id="zoomOutBtn">縮小</button>
+  </div>
+  <div id="score">手数: 0　最高記録: -</div>
+  <p>
+    プレイヤーは、【鬼】(赤い大きな丸)を操作します。<br>
+    移動したいマスをタップ、またはクリックして動いてください。<br>
+    【ゆらん】(青い大きな丸)を捕まえたら勝利です。
+  </p>
+  <canvas id="gameCanvas"></canvas>
+  <button id="restartBtn">リセット</button>
 
+  <script>
+    window.addEventListener("load", function () {
+      const canvas = document.getElementById("gameCanvas");
+      const ctx = canvas.getContext("2d");
+      const restartBtn = document.getElementById("restartBtn");
+      const zoomInBtn = document.getElementById("zoomInBtn");
+      const zoomOutBtn = document.getElementById("zoomOutBtn");
+      const scoreDiv = document.getElementById("score");
+      let captureStartTime = null;
+
+      function resizeCanvas() {
+        const side = Math.min(window.innerWidth, window.innerHeight) * 0.95;
+        canvas.width = side;
+        canvas.height = side;
+        drawMap();
+      }
+      function getBaseScale() { return canvas.width / 8; }
+
+      const nodePositions = {
+        "h": { x: 2, y: 1 },
+        "a": { x: 4, y: 0.5 },
+        "b": { x: 6, y: 1.5 },
+        "c": { x: 1.5, y: 2 },
+        "d": { x: 3, y: 2 },
+        "e": { x: 7, y: 2.5 },
+        "f": { x: 1, y: 3.5 },
+        "g": { x: 2.2, y: 3.7 },
+        "i": { x: 4.5, y: 3.5 },
+        "j": { x: 2, y: 5.5 },
+        "k": { x: 3, y: 4.8 },
+        "l": { x: 6.5, y: 4.5 },
+        "m": { x: 7.8, y: 4.6 },
+        "n": { x: 2.7, y: 6.5 },
+        "o": { x: 4.7, y: 6 },
+        "p": { x: 7.5, y: 6.3 },
+        "q": { x: 4.2, y: 7.8 },
+        "r": { x: 6.6, y: 7.5 },
+        "s": { x: 5.7, y: 8 }
+      };
+      const connections = {
+        "h": ["c", "d", "a"],
+        "a": ["h", "b"],
+        "b": ["a", "d", "e"],
+        "c": ["f", "g", "h"],
+        "d": ["h", "g", "i", "b"],
+        "e": ["b", "i", "m"],
+        "f": ["j", "c"],
+        "g": ["j", "k", "c", "d"],
+        "i": ["k", "l", "d", "e"],
+        "j": ["f", "g", "n"],
+        "k": ["n", "o", "g", "i"],
+        "l": ["o", "i", "r", "m"],
+        "m": ["l", "p", "e"],
+        "n": ["j", "k", "q"],
+        "o": ["q", "k", "l"],
+        "p": ["r", "m"],
+        "q": ["s", "r", "o", "n"],
+        "r": ["s", "q", "l", "p"],
+        "s": ["q", "r", "l"]
+      };
+
+      let catcherPos, runnerPos, captured;
+      let moveCount = 0, bestScore = null;
+      // 初期状態で少しズームアウト
+      let zoomFactor = 0.9;
+      let isAnimatingCapture = false;
+
+      function computeNodes() {
+        const computed = {};
+        const baseScale = getBaseScale();
+        for (let key in nodePositions) {
+          computed[key] = {
+            x: nodePositions[key].x * baseScale * zoomFactor,
+            y: canvas.height - (nodePositions[key].y * baseScale * zoomFactor)
+          };
+        }
+        return computed;
+      }
+      function distance(p1, p2) { return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2); }
+      function moveRunner(catcherNode, runnerNode, computedNodes) {
+        const allowed = connections[runnerNode];
+        if (!allowed || allowed.length === 0) return runnerNode;
+        let best = allowed[0];
+        let maxDist = distance(computedNodes[allowed[0]], computedNodes[catcherNode]);
+        allowed.forEach(move => {
+          const d = distance(computedNodes[move], computedNodes[catcherNode]);
+          if (d > maxDist) { best = move; maxDist = d; }
+        });
+        return best;
+      }
+      function drawMap() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const computedNodes = computeNodes();
+        const cellRadius = 15 * zoomFactor;
+        for (let key in connections) {
+          const fromPos = computedNodes[key];
+          connections[key].forEach(neighbor => {
+            if (key < neighbor) {
+              const toPos = computedNodes[neighbor];
+              ctx.beginPath();
+              ctx.moveTo(fromPos.x, fromPos.y);
+              ctx.lineTo(toPos.x, toPos.y);
+              ctx.strokeStyle = "black";
+              ctx.lineWidth = 2;
+              ctx.stroke();
+            }
+          });
+        }
+        for (let key in computedNodes) {
+          const pos = computedNodes[key];
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, cellRadius, 0, Math.PI * 2);
+          ctx.fillStyle = "#fff";
+          ctx.fill();
+          ctx.strokeStyle = "black";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        if (catcherPos && computedNodes[catcherPos]) {
+          const catcherCoords = computedNodes[catcherPos];
+          ctx.beginPath();
+          ctx.arc(catcherCoords.x, catcherCoords.y, 20 * zoomFactor, 0, Math.PI * 2);
+          ctx.fillStyle = "red";
+          ctx.fill();
+        }
+        if (!captured && runnerPos && computedNodes[runnerPos]) {
+          const runnerCoords = computedNodes[runnerPos];
+          ctx.beginPath();
+          ctx.arc(runnerCoords.x, runnerCoords.y, 20 * zoomFactor, 0, Math.PI * 2);
+          ctx.fillStyle = "blue";
+          ctx.fill();
+        }
+        if (captured) {
+          if (!captureStartTime) { captureStartTime = Date.now(); }
+          const cyclePeriod = 1000;
+          const elapsed = (Date.now() - captureStartTime) % cyclePeriod;
+          const progress = elapsed / cyclePeriod;
+          const ringRadius = (20 * zoomFactor) + 30 * progress;
+          const ringOpacity = 1 - progress;
+          if (computedNodes[catcherPos]) {
+            const catcherCoords = computedNodes[catcherPos];
+            ctx.beginPath();
+            ctx.arc(catcherCoords.x, catcherCoords.y, ringRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(255, 0, 0, " + ringOpacity + ")";
+            ctx.lineWidth = 4;
+            ctx.stroke();
+          }
+          const fontSize = 80 * zoomFactor;
+          ctx.font = "bold " + fontSize + "px Arial";
+          ctx.fillStyle = "red";
+          ctx.textAlign = "center";
+          const centerX = canvas.width / 2;
+          const centerY = canvas.height / 2;
+          ctx.fillText("捕獲成功！", centerX, centerY - fontSize * 0.3);
+          ctx.fillText("おめでとう！", centerX, centerY + fontSize * 0.8);
+        }
+      }
+      function updateScore() {
+        scoreDiv.innerText = "手数: " + moveCount + "　最高記録: " + (bestScore === null ? "-" : bestScore);
+      }
+      function animateCapturePersistent() {
+        drawMap();
+        if (captured) { requestAnimationFrame(animateCapturePersistent); }
+      }
+      function initGame() {
+        catcherPos = "m";
+        runnerPos = "h";
+        captured = false;
+        moveCount = 0;
+        isAnimatingCapture = false;
+        captureStartTime = null;
+        updateScore();
+        drawMap();
+      }
+      canvas.addEventListener("click", function (event) {
+        if (captured) return;
+        const rect = canvas.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+        const computedNodes = computeNodes();
+        const cellRadius = 15 * zoomFactor;
+        const clickThreshold = cellRadius + 10;
+        let clickedKey = null;
+        for (let key in computedNodes) {
+          const pos = computedNodes[key];
+          if (distance({ x: clickX, y: clickY }, pos) < clickThreshold) {
+            clickedKey = key;
+            break;
+          }
+        }
+        if (!clickedKey) return;
+        const allowed = connections[catcherPos] || [];
+        if (allowed.indexOf(clickedKey) === -1) return;
+       
+        catcherPos = clickedKey;
+        moveCount++;
+        if (catcherPos === runnerPos) {
+          captured = true;
+          if (bestScore === null || moveCount < bestScore) { bestScore = moveCount; }
+          captureStartTime = Date.now();
+          updateScore();
+          drawMap();
+          if (!isAnimatingCapture) {
+            isAnimatingCapture = true;
+            requestAnimationFrame(animateCapturePersistent);
+          }
+          return;
+        }
+        updateScore();
+        drawMap();
+     
+        setTimeout(function () {
+          const computedNodesAfter = computeNodes();
+          runnerPos = moveRunner(catcherPos, runnerPos, computedNodesAfter);
+          if (catcherPos === runnerPos) {
+            captured = true;
+            if (bestScore === null || moveCount < bestScore) { bestScore = moveCount; }
+            captureStartTime = Date.now();
+          }
+          updateScore();
+          drawMap();
+          if (captured && !isAnimatingCapture) {
+            isAnimatingCapture = true;
+            requestAnimationFrame(animateCapturePersistent);
+          }
+        }, 300);
+      });
+      zoomInBtn.addEventListener("click", function () { zoomFactor *= 1.1; drawMap(); });
+      zoomOutBtn.addEventListener("click", function () { zoomFactor /= 1.1; drawMap(); });
+      restartBtn.addEventListener("click", function () { initGame(); });
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
+      initGame();
+    });
+  </script>
+</body>
 </html>
